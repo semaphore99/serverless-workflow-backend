@@ -13,7 +13,7 @@ func StartWorker(c client.Client) worker.Worker {
 	w.RegisterWorkflow(ExecuteServerlessYAMLWorkflow)
 	w.RegisterWorkflow(ChatbotWorkflow)
 	w.RegisterActivity(SimpleActivity)
-	
+
 	// Register chatbot activities
 	chatbotActivities := NewChatbotActivities()
 	w.RegisterActivity(chatbotActivities)

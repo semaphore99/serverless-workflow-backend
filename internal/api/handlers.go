@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/semaphore99/serverless-workflow-backend/internal/workflows"
@@ -103,7 +104,24 @@ func (h *Handlers) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 
 	workflowID := "chatbot-workflow-" + requestBody.ThreadID
 
-	err := h.temporal.SignalWorkflow(r.Context(), workflowID, "", "user-input", workflows.UserInputSignal{
+	// Get initial conversation length
+	var initialState *workflows.ChatbotState
+	resp, err := h.temporal.QueryWorkflow(r.Context(), workflowID, "", "get-state")
+	if err != nil {
+		log.Printf("Unable to query initial workflow state: %v", err)
+		http.Error(w, "Failed to get workflow state", http.StatusInternalServerError)
+		return
+	}
+	err = resp.Get(&initialState)
+	if err != nil {
+		log.Printf("Unable to decode initial query result: %v", err)
+		http.Error(w, "Failed to decode workflow state", http.StatusInternalServerError)
+		return
+	}
+	initialLength := len(initialState.Conversation)
+
+	// Send user input signal
+	err = h.temporal.SignalWorkflow(r.Context(), workflowID, "", "user-input", workflows.UserInputSignal{
 		Message: requestBody.Message,
 	})
 	if err != nil {
@@ -112,8 +130,64 @@ func (h *Handlers) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Poll for the response (wait for conversation to grow by 2: user message + assistant response)
+	for i := 0; i < 50; i++ { // Max 50 attempts (5 seconds)
+		var currentState *workflows.ChatbotState
+		resp, err := h.temporal.QueryWorkflow(r.Context(), workflowID, "", "get-state")
+		if err != nil {
+			log.Printf("Unable to query workflow state: %v", err)
+			http.Error(w, "Failed to get workflow state", http.StatusInternalServerError)
+			return
+		}
+		err = resp.Get(&currentState)
+		if err != nil {
+			log.Printf("Unable to decode query result: %v", err)
+			http.Error(w, "Failed to decode workflow state", http.StatusInternalServerError)
+			return
+		}
+
+		// Check if we have the assistant's response (conversation should have grown by 2)
+		if len(currentState.Conversation) >= initialLength+2 {
+			lastMessage := currentState.Conversation[len(currentState.Conversation)-1]
+
+			// Extract text content from the assistant's response
+			var responseText string
+			if lastMessage.Role == "assistant" && len(lastMessage.Content) > 0 {
+				// Convert to JSON and back to extract text content
+				contentBytes, err := json.Marshal(lastMessage.Content[0])
+				if err == nil {
+					var contentBlock map[string]interface{}
+					if json.Unmarshal(contentBytes, &contentBlock) == nil {
+						if text, exists := contentBlock["text"]; exists {
+							if textStr, ok := text.(string); ok {
+								responseText = textStr
+							}
+						}
+					}
+				}
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":   true,
+				"response":  responseText,
+				"thread_id": requestBody.ThreadID,
+			})
+			return
+		}
+
+		// Wait 100ms before polling again
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Timeout - return success but indicate we couldn't get the response in time
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"response":  "Processing your message...",
+		"thread_id": requestBody.ThreadID,
+		"note":      "Response is being processed. Use GET /workflow/thread to retrieve the full conversation.",
+	})
 }
 
 func (h *Handlers) GetChatThread(w http.ResponseWriter, r *http.Request) {
