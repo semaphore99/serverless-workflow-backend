@@ -46,9 +46,7 @@ func ChatbotWorkflow(ctx workflow.Context, threadID string) (*ChatbotState, erro
 
 1. Help users design and create serverless workflow definitions in JSON format
 2. Follow the official schema specification from https://serverlessworkflow.io/schemas/1.0.0/workflow.json
-3. Provide guidance on workflow structure, states, events, actions, and transitions
-4. Validate workflow syntax and suggest improvements
-5. Explain serverless workflow concepts and best practices
+3. Ensure that all workflow definitions are valid and conform to the schema
 
 When assisting users, always prioritize creating valid, well-structured workflow definitions that conform to the CNCF Serverless Workflow v1.0 specification. Ask clarifying questions about the user's requirements to build the most appropriate workflow for their use case.`
 
@@ -114,7 +112,7 @@ func (a *ChatbotActivities) CallClaudeAPI(ctx context.Context, systemPrompt stri
 
 	resp, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.ModelClaude4Sonnet20250514,
-		MaxTokens: 1024,
+		MaxTokens: 4096,
 		System: []anthropic.TextBlockParam{
 			{Text: systemPrompt},
 		},
@@ -126,6 +124,18 @@ func (a *ChatbotActivities) CallClaudeAPI(ctx context.Context, systemPrompt stri
 
 	if len(resp.Content) == 0 {
 		return nil, fmt.Errorf("empty response content from Claude API")
+	}
+
+	// Log if response was truncated due to max tokens
+	if resp.StopReason == "max_tokens" {
+		logger.Warn("Response was truncated due to max_tokens limit", 
+			"input_tokens", resp.Usage.InputTokens,
+			"output_tokens", resp.Usage.OutputTokens)
+	} else {
+		logger.Info("Response completed normally", 
+			"stop_reason", resp.StopReason,
+			"input_tokens", resp.Usage.InputTokens,
+			"output_tokens", resp.Usage.OutputTokens)
 	}
 
 	return resp, nil
