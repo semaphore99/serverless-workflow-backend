@@ -15,6 +15,7 @@ import (
 type ChatbotState struct {
 	Conversation []anthropic.MessageParam `json:"conversation"`
 	ThreadID     string                   `json:"thread_id"`
+	SystemPrompt string                   `json:"system_prompt"`
 }
 
 type UserInputSignal struct {
@@ -40,9 +41,21 @@ func ChatbotWorkflow(ctx workflow.Context, threadID string) (*ChatbotState, erro
 	logger := workflow.GetLogger(ctx)
 	logger.Info("ChatbotWorkflow started", "threadID", threadID)
 
+	// Initialize with system prompt for serverless workflow assistance
+	systemPrompt := `You are a specialized assistant dedicated to helping users create workflow definitions based on the CNCF Serverless Workflow v1.0 specification. Your primary focus is to:
+
+1. Help users design and create serverless workflow definitions in JSON format
+2. Follow the official schema specification from https://serverlessworkflow.io/schemas/1.0.0/workflow.json
+3. Provide guidance on workflow structure, states, events, actions, and transitions
+4. Validate workflow syntax and suggest improvements
+5. Explain serverless workflow concepts and best practices
+
+When assisting users, always prioritize creating valid, well-structured workflow definitions that conform to the CNCF Serverless Workflow v1.0 specification. Ask clarifying questions about the user's requirements to build the most appropriate workflow for their use case.`
+
 	state := &ChatbotState{
 		ThreadID:     threadID,
 		Conversation: []anthropic.MessageParam{},
+		SystemPrompt: systemPrompt,
 	}
 
 	ao := workflow.ActivityOptions{
@@ -62,9 +75,9 @@ func ChatbotWorkflow(ctx workflow.Context, threadID string) (*ChatbotState, erro
 
 	for {
 		var userInput UserInputSignal
-		signalReceived := signalCh.Receive(ctx, &userInput)
+		signalReceived, _ := signalCh.ReceiveWithTimeout(ctx, 10*time.Minute, &userInput)
 		if !signalReceived {
-			logger.Info("ChatbotWorkflow completed - no more signals expected")
+			logger.Info("ChatbotWorkflow completed - timeout after 10 minutes of inactivity")
 			break
 		}
 
@@ -74,7 +87,7 @@ func ChatbotWorkflow(ctx workflow.Context, threadID string) (*ChatbotState, erro
 
 		activities := NewChatbotActivities()
 		var response *anthropic.Message
-		err := workflow.ExecuteActivity(ctx, activities.CallClaudeAPI, state.Conversation).Get(ctx, &response)
+		err := workflow.ExecuteActivity(ctx, activities.CallClaudeAPI, state.SystemPrompt, state.Conversation).Get(ctx, &response)
 		if err != nil {
 			logger.Error("Failed to call Claude API", "error", err)
 
@@ -91,7 +104,7 @@ func ChatbotWorkflow(ctx workflow.Context, threadID string) (*ChatbotState, erro
 	return state, nil
 }
 
-func (a *ChatbotActivities) CallClaudeAPI(ctx context.Context, conversation []anthropic.MessageParam) (*anthropic.Message, error) {
+func (a *ChatbotActivities) CallClaudeAPI(ctx context.Context, systemPrompt string, conversation []anthropic.MessageParam) (*anthropic.Message, error) {
 	logger := activity.GetLogger(ctx)
 	logger.Info("CallClaudeAPI activity started")
 
@@ -100,9 +113,12 @@ func (a *ChatbotActivities) CallClaudeAPI(ctx context.Context, conversation []an
 	}
 
 	resp, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     anthropic.ModelClaude3_5HaikuLatest,
+		Model:     anthropic.ModelClaude4Sonnet20250514,
 		MaxTokens: 1024,
-		Messages:  conversation,
+		System: []anthropic.TextBlockParam{
+			{Text: systemPrompt},
+		},
+		Messages: conversation,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to call Claude API: %w", err)
