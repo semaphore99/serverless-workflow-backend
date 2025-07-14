@@ -11,12 +11,17 @@ func StartWorker(c client.Client) worker.Worker {
 
 	w.RegisterWorkflow(SimpleWorkflow)
 	w.RegisterWorkflow(ExecuteServerlessYAMLWorkflow)
+	w.RegisterWorkflow(ExecuteServerlessJSONWorkflow)
 	w.RegisterWorkflow(ChatbotWorkflow)
 	w.RegisterActivity(SimpleActivity)
 
 	// Register chatbot activities
 	chatbotActivities := NewChatbotActivities()
 	w.RegisterActivity(chatbotActivities)
+
+	// Register serverless workflow activities
+	w.RegisterActivity(HTTPCallActivity)
+	w.RegisterActivity(ExecuteBranchActivity)
 
 	return w
 }

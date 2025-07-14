@@ -54,6 +54,35 @@ func (h *Handlers) ExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"workflow_id": wfRun.GetID()})
 }
 
+func (h *Handlers) ExecuteJSONWorkflow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read the raw JSON payload
+	workflowJSONBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+
+	options := client.StartWorkflowOptions{
+		ID:        "json-workflow-" + uuid.New().String(),
+		TaskQueue: "serverless-workflow-task-queue",
+	}
+
+	wfRun, err := h.temporal.ExecuteWorkflow(r.Context(), options, workflows.ExecuteServerlessJSONWorkflow, string(workflowJSONBytes))
+	if err != nil {
+		log.Printf("Unable to execute JSON workflow: %v", err)
+		http.Error(w, "Failed to execute JSON workflow", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"workflow_id": wfRun.GetID()})
+}
+
 func (h *Handlers) InitiateChatbot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)

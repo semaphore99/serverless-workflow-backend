@@ -33,6 +33,7 @@ func main() {
 
 	http.HandleFunc("/health", handlers.HealthCheck)
 	http.HandleFunc("/workflows", handlers.ExecuteWorkflow)
+	http.HandleFunc("/workflows/json", handlers.ExecuteJSONWorkflow)
 	http.HandleFunc("/chatbot/init", handlers.InitiateChatbot)
 	http.HandleFunc("/chatbot/message", handlers.SendChatMessage)
 	http.HandleFunc("/chatbot/thread", handlers.GetChatThread)
