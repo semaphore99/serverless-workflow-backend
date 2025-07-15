@@ -175,8 +175,8 @@ func (h *Handlers) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Check if we have the assistant's response (conversation should have grown by 2)
-		if len(currentState.Conversation) >= initialLength+2 {
+		// Check if we have the assistant's response (conversation should have grown by 2) AND processing is complete
+		if len(currentState.Conversation) >= initialLength+2 && !currentState.IsProcessing {
 			lastMessage := currentState.Conversation[len(currentState.Conversation)-1]
 
 			// Extract text content from the assistant's response

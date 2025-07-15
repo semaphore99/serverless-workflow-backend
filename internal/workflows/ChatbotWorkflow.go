@@ -2,12 +2,16 @@ package workflows
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/serverlessworkflow/sdk-go/v3/parser"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/workflow"
 )
@@ -16,10 +20,18 @@ type ChatbotState struct {
 	Conversation []anthropic.MessageParam `json:"conversation"`
 	ThreadID     string                   `json:"thread_id"`
 	SystemPrompt string                   `json:"system_prompt"`
+	IsProcessing bool                     `json:"is_processing"`
 }
 
 type UserInputSignal struct {
 	Message string `json:"message"`
+}
+
+type WorkflowValidationResult struct {
+	HasWorkflow     bool   `json:"has_workflow"`
+	IsValid         bool   `json:"is_valid"`
+	ValidationError string `json:"validation_error"`
+	WorkflowCode    string `json:"workflow_code"`
 }
 
 type ChatbotActivities struct {
@@ -54,6 +66,7 @@ When assisting users, always prioritize creating valid, well-structured workflow
 		ThreadID:     threadID,
 		Conversation: []anthropic.MessageParam{},
 		SystemPrompt: systemPrompt,
+		IsProcessing: false,
 	}
 
 	ao := workflow.ActivityOptions{
@@ -81,22 +94,64 @@ When assisting users, always prioritize creating valid, well-structured workflow
 
 		logger.Info("Received user input", "message", userInput.Message)
 
+		// Mark as processing when we start handling the user input
+		state.IsProcessing = true
 		state.Conversation = append(state.Conversation, anthropic.NewUserMessage(anthropic.NewTextBlock(userInput.Message)))
 
 		activities := NewChatbotActivities()
-		var response *anthropic.Message
-		err := workflow.ExecuteActivity(ctx, activities.CallClaudeAPI, state.SystemPrompt, state.Conversation).Get(ctx, &response)
-		if err != nil {
-			logger.Error("Failed to call Claude API", "error", err)
+		
+		// Try to get a valid response, with retries for invalid workflows
+		maxRetries := 3
+		for retry := 0; retry < maxRetries; retry++ {
+			var response *anthropic.Message
+			err := workflow.ExecuteActivity(ctx, activities.CallClaudeAPI, state.SystemPrompt, state.Conversation).Get(ctx, &response)
+			if err != nil {
+				logger.Error("Failed to call Claude API", "error", err)
 
-			errorResponse := "I apologize, but I'm having trouble connecting to the AI service right now. Please try again later."
-			state.Conversation = append(state.Conversation, anthropic.NewAssistantMessage(anthropic.NewTextBlock(errorResponse)))
-			continue
+				errorResponse := "I apologize, but I'm having trouble connecting to the AI service right now. Please try again later."
+				state.Conversation = append(state.Conversation, anthropic.NewAssistantMessage(anthropic.NewTextBlock(errorResponse)))
+				state.IsProcessing = false
+				break
+			}
+
+			// Check if the response contains a valid workflow
+			validationResult := validateWorkflowInResponse(response)
+			if validationResult.ValidationError != "" {
+				logger.Error("Failed to validate workflow in response", "error", validationResult.ValidationError)
+			}
+
+			if validationResult.IsValid {
+				// Valid workflow, add response and continue
+				state.Conversation = append(state.Conversation, response.ToParam())
+				logger.Info("Added Claude response to chat history", "response", response.Content)
+				state.IsProcessing = false
+				break
+			} else if validationResult.HasWorkflow {
+				// Invalid workflow, ask Claude to fix it
+				logger.Info("Invalid workflow detected, asking Claude to fix it", "error", validationResult.ValidationError)
+				
+				// Add the response first
+				state.Conversation = append(state.Conversation, response.ToParam())
+				
+				// Then add correction request
+				correctionPrompt := fmt.Sprintf("The workflow you provided has validation errors:\n\n%s\n\nPlease correct the workflow and provide a valid JSON workflow definition.", validationResult.ValidationError)
+				state.Conversation = append(state.Conversation, anthropic.NewUserMessage(anthropic.NewTextBlock(correctionPrompt)))
+				
+				// If this is the last retry, stop processing
+				if retry == maxRetries-1 {
+					state.IsProcessing = false
+				}
+				
+				// Continue to next retry
+				continue
+			} else {
+				// No workflow in response, just add it normally
+				state.Conversation = append(state.Conversation, response.ToParam())
+				logger.Info("Added Claude response to chat history", "response", response.Content)
+				state.IsProcessing = false
+				break
+			}
 		}
-
-		state.Conversation = append(state.Conversation, response.ToParam())
-
-		logger.Info("Added Claude response to chat history", "response", response.Content)
 	}
 
 	return state, nil
@@ -139,6 +194,89 @@ func (a *ChatbotActivities) CallClaudeAPI(ctx context.Context, systemPrompt stri
 	}
 
 	return resp, nil
+}
+
+// validateWorkflowInResponse validates workflow code in Claude's response (deterministic function)
+func validateWorkflowInResponse(response *anthropic.Message) WorkflowValidationResult {
+	result := WorkflowValidationResult{
+		HasWorkflow:     false,
+		IsValid:         false,
+		ValidationError: "",
+		WorkflowCode:    "",
+	}
+
+	// Extract text content from the response
+	var responseText string
+	if len(response.Content) > 0 {
+		// Convert to JSON and extract text content
+		contentBytes, err := json.Marshal(response.Content[0])
+		if err == nil {
+			var contentBlock map[string]interface{}
+			if json.Unmarshal(contentBytes, &contentBlock) == nil {
+				if text, exists := contentBlock["text"]; exists {
+					if textStr, ok := text.(string); ok {
+						responseText = textStr
+					}
+				}
+			}
+		}
+	}
+
+	if responseText == "" {
+		return result
+	}
+
+	// Look for JSON code blocks
+	codeBlock := extractJSONCodeBlock(responseText)
+	if codeBlock == "" {
+		return result
+	}
+
+	result.HasWorkflow = true
+	result.WorkflowCode = codeBlock
+
+	// Try to parse the workflow
+	_, err := parser.FromJSONSource([]byte(codeBlock))
+	if err != nil {
+		result.IsValid = false
+		result.ValidationError = err.Error()
+	} else {
+		result.IsValid = true
+	}
+
+	return result
+}
+
+// extractJSONCodeBlock extracts JSON code from markdown code blocks
+func extractJSONCodeBlock(text string) string {
+	// Look for ```json or ``` followed by JSON content
+	patterns := []string{
+		"```json\\s*\\n([\\s\\S]*?)```",
+		"```\\s*\\n(\\{[\\s\\S]*?\\})```",
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(text)
+		if len(matches) > 1 {
+			return strings.TrimSpace(matches[1])
+		}
+	}
+
+	// If no code block found, look for standalone JSON objects
+	jsonPattern := `\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}`
+	re := regexp.MustCompile(jsonPattern)
+	matches := re.FindAllString(text, -1)
+	
+	// Return the largest JSON object found
+	var largestJSON string
+	for _, match := range matches {
+		if len(match) > len(largestJSON) {
+			largestJSON = match
+		}
+	}
+	
+	return strings.TrimSpace(largestJSON)
 }
 
 func getClaudeAPIKey() string {

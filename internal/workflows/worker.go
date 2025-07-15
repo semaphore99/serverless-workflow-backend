@@ -17,7 +17,7 @@ func StartWorker(c client.Client) worker.Worker {
 
 	// Register chatbot activities
 	chatbotActivities := NewChatbotActivities()
-	w.RegisterActivity(chatbotActivities)
+	w.RegisterActivity(chatbotActivities.CallClaudeAPI)
 
 	// Register serverless workflow activities
 	w.RegisterActivity(HTTPCallActivity)
