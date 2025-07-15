@@ -161,7 +161,7 @@ func (h *Handlers) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Poll for the response (wait for conversation to grow by 2: user message + assistant response)
-	for i := 0; i < 30; i++ { // Max 30 attempts (30 seconds)
+	for i := 0; i < 30; i++ { // Max 30 attempts (60 seconds)
 		var currentState *workflows.ChatbotState
 		resp, err := h.temporal.QueryWorkflow(r.Context(), workflowID, "", "get-state")
 		if err != nil {
@@ -207,7 +207,7 @@ func (h *Handlers) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Wait 1 second before polling again
-		time.Sleep(1 * time.Second)
+		time.Sleep(2 * time.Second)
 	}
 
 	// Timeout - return success but indicate we couldn't get the response in time
@@ -257,7 +257,7 @@ func (h *Handlers) DemoHandler(w http.ResponseWriter, r *http.Request) {
 	// Random wait time between 1-5 seconds
 	waitTime := time.Duration(rand.Intn(4)+1) * time.Second
 	time.Sleep(waitTime)
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":    "ok",

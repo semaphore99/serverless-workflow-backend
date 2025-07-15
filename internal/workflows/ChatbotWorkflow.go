@@ -60,7 +60,8 @@ func ChatbotWorkflow(ctx workflow.Context, threadID string) (*ChatbotState, erro
 2. Follow the official schema specification from https://serverlessworkflow.io/schemas/1.0.0/workflow.json
 3. Ensure that all workflow definitions are valid and conform to the schema
 4. all http calls should be made to sub-paths under localhost:8088/demo
-When assisting users, always prioritize creating valid, well-structured workflow definitions that conform to the CNCF Serverless Workflow v1.0 specification. Ask clarifying questions about the user's requirements to build the most appropriate workflow for their use case.`
+
+Make sure to prioritize creating valid, well-structured workflow definitions that conform to the CNCF Serverless Workflow v1.0 specification with json spec at https://serverlessworkflow.io/schemas/1.0.0/workflow.json. Ask clarifying questions about the user's requirements to build the most appropriate workflow for their use case.`
 
 	state := &ChatbotState{
 		ThreadID:     threadID,
