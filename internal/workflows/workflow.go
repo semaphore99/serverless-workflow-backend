@@ -372,11 +372,102 @@ func ExecuteBranchActivity(ctx context.Context, req ExecuteBranchRequest) (inter
 	logger := activity.GetLogger(ctx)
 	logger.Info("ExecuteBranchActivity started", "tasks", len(req.Tasks))
 	
-	// For now, just return a mock result
-	// In a real implementation, this would need to execute the tasks recursively
-	// by calling back into the workflow execution logic
+	// Execute tasks sequentially within this branch
+	branchState := make(map[string]interface{})
+	var lastResult interface{}
+	
+	// Copy parent state to branch state
+	for key, value := range req.State {
+		branchState[key] = value
+	}
+	
+	for i, taskItem := range req.Tasks {
+		logger.Info("Executing branch task", "index", i, "key", taskItem.Key)
+		
+		// Execute each task based on its type
+		var result interface{}
+		var err error
+		
+		if doTask := taskItem.AsDoTask(); doTask != nil {
+			// Handle "do" tasks which contain nested task lists
+			result, err = executeBranchDoTask(ctx, doTask, branchState)
+		} else if httpTask := taskItem.AsCallHTTPTask(); httpTask != nil {
+			result, err = executeBranchHTTPTask(ctx, httpTask)
+		} else if setTask := taskItem.AsSetTask(); setTask != nil {
+			result, err = executeBranchSetTask(setTask, branchState)
+		} else {
+			err = fmt.Errorf("unsupported task type in branch: %s", taskItem.Key)
+		}
+		
+		if err != nil {
+			logger.Error("Branch task failed", "task", taskItem.Key, "error", err)
+			return nil, fmt.Errorf("branch task %s failed: %w", taskItem.Key, err)
+		}
+		
+		lastResult = result
+		branchState[taskItem.Key] = result
+	}
+	
+	logger.Info("Branch execution completed", "tasks", len(req.Tasks))
 	return map[string]interface{}{
-		"branch_result": "Branch executed successfully",
+		"branch_result": lastResult,
 		"task_count":    len(req.Tasks),
+		"state":         branchState,
 	}, nil
+}
+
+// executeBranchDoTask executes "do" tasks within a branch
+func executeBranchDoTask(ctx context.Context, doTask *model.DoTask, state map[string]interface{}) (interface{}, error) {
+	logger := activity.GetLogger(ctx)
+	logger.Info("Executing branch do task", "nestedTasks", len(*doTask.Do))
+	
+	// Execute nested tasks sequentially
+	var lastResult interface{}
+	for i, nestedTaskItem := range *doTask.Do {
+		logger.Info("Executing nested task in branch", "index", i, "key", nestedTaskItem.Key)
+		
+		var result interface{}
+		var err error
+		
+		if httpTask := nestedTaskItem.AsCallHTTPTask(); httpTask != nil {
+			result, err = executeBranchHTTPTask(ctx, httpTask)
+		} else if setTask := nestedTaskItem.AsSetTask(); setTask != nil {
+			result, err = executeBranchSetTask(setTask, state)
+		} else {
+			err = fmt.Errorf("unsupported nested task type in branch: %s", nestedTaskItem.Key)
+		}
+		
+		if err != nil {
+			return nil, fmt.Errorf("nested task %s failed: %w", nestedTaskItem.Key, err)
+		}
+		
+		lastResult = result
+		state[nestedTaskItem.Key] = result
+	}
+	
+	return lastResult, nil
+}
+
+// executeBranchHTTPTask executes HTTP tasks within a branch
+func executeBranchHTTPTask(ctx context.Context, httpTask *model.CallHTTP) (interface{}, error) {
+	logger := activity.GetLogger(ctx)
+	logger.Info("Executing branch HTTP task", "endpoint", httpTask.With.Endpoint.String())
+	
+	// Use the same HTTP call logic as the main workflow
+	req := HTTPCallRequest{
+		Method:   httpTask.With.Method,
+		Endpoint: httpTask.With.Endpoint.String(),
+		Body:     httpTask.With.Body,
+		Headers:  httpTask.With.Headers,
+	}
+	
+	return executeRegularHTTPCall(ctx, req)
+}
+
+// executeBranchSetTask executes set tasks within a branch
+func executeBranchSetTask(setTask *model.SetTask, state map[string]interface{}) (interface{}, error) {
+	for key, value := range setTask.Set {
+		state[key] = value
+	}
+	return setTask.Set, nil
 }

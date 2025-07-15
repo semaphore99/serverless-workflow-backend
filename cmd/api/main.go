@@ -37,6 +37,7 @@ func main() {
 	http.HandleFunc("/chatbot/init", handlers.InitiateChatbot)
 	http.HandleFunc("/chatbot/message", handlers.SendChatMessage)
 	http.HandleFunc("/chatbot/thread", handlers.GetChatThread)
+	http.HandleFunc("/demo/", handlers.DemoHandler)
 
 	server := &http.Server{
 		Addr: ":8088",

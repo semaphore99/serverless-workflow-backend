@@ -59,7 +59,7 @@ func ChatbotWorkflow(ctx workflow.Context, threadID string) (*ChatbotState, erro
 1. Help users design and create serverless workflow definitions in JSON format
 2. Follow the official schema specification from https://serverlessworkflow.io/schemas/1.0.0/workflow.json
 3. Ensure that all workflow definitions are valid and conform to the schema
-
+4. all http calls should be made to sub-paths under localhost:8088/demo
 When assisting users, always prioritize creating valid, well-structured workflow definitions that conform to the CNCF Serverless Workflow v1.0 specification. Ask clarifying questions about the user's requirements to build the most appropriate workflow for their use case.`
 
 	state := &ChatbotState{
@@ -99,7 +99,7 @@ When assisting users, always prioritize creating valid, well-structured workflow
 		state.Conversation = append(state.Conversation, anthropic.NewUserMessage(anthropic.NewTextBlock(userInput.Message)))
 
 		activities := NewChatbotActivities()
-		
+
 		// Try to get a valid response, with retries for invalid workflows
 		maxRetries := 3
 		for retry := 0; retry < maxRetries; retry++ {
@@ -129,19 +129,19 @@ When assisting users, always prioritize creating valid, well-structured workflow
 			} else if validationResult.HasWorkflow {
 				// Invalid workflow, ask Claude to fix it
 				logger.Info("Invalid workflow detected, asking Claude to fix it", "error", validationResult.ValidationError)
-				
+
 				// Add the response first
 				state.Conversation = append(state.Conversation, response.ToParam())
-				
+
 				// Then add correction request
 				correctionPrompt := fmt.Sprintf("The workflow you provided has validation errors:\n\n%s\n\nPlease correct the workflow and provide a valid JSON workflow definition.", validationResult.ValidationError)
 				state.Conversation = append(state.Conversation, anthropic.NewUserMessage(anthropic.NewTextBlock(correctionPrompt)))
-				
+
 				// If this is the last retry, stop processing
 				if retry == maxRetries-1 {
 					state.IsProcessing = false
 				}
-				
+
 				// Continue to next retry
 				continue
 			} else {
@@ -183,11 +183,11 @@ func (a *ChatbotActivities) CallClaudeAPI(ctx context.Context, systemPrompt stri
 
 	// Log if response was truncated due to max tokens
 	if resp.StopReason == "max_tokens" {
-		logger.Warn("Response was truncated due to max_tokens limit", 
+		logger.Warn("Response was truncated due to max_tokens limit",
 			"input_tokens", resp.Usage.InputTokens,
 			"output_tokens", resp.Usage.OutputTokens)
 	} else {
-		logger.Info("Response completed normally", 
+		logger.Info("Response completed normally",
 			"stop_reason", resp.StopReason,
 			"input_tokens", resp.Usage.InputTokens,
 			"output_tokens", resp.Usage.OutputTokens)
@@ -267,7 +267,7 @@ func extractJSONCodeBlock(text string) string {
 	jsonPattern := `\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}`
 	re := regexp.MustCompile(jsonPattern)
 	matches := re.FindAllString(text, -1)
-	
+
 	// Return the largest JSON object found
 	var largestJSON string
 	for _, match := range matches {
@@ -275,7 +275,7 @@ func extractJSONCodeBlock(text string) string {
 			largestJSON = match
 		}
 	}
-	
+
 	return strings.TrimSpace(largestJSON)
 }
 

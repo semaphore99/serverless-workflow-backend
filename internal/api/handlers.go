@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"time"
 
@@ -250,4 +251,19 @@ func (h *Handlers) GetChatThread(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+func (h *Handlers) DemoHandler(w http.ResponseWriter, r *http.Request) {
+	// Random wait time between 1-5 seconds
+	waitTime := time.Duration(rand.Intn(4)+1) * time.Second
+	time.Sleep(waitTime)
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":    "ok",
+		"uuid":      uuid.New().String(),
+		"method":    r.Method,
+		"path":      r.URL.Path,
+		"wait_time": waitTime.String(),
+	})
 }
