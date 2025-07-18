@@ -45,20 +45,55 @@ func SimpleActivity(ctx context.Context, name string) (string, error) {
 	return fmt.Sprintf("Hello, %s!", name), nil
 }
 
-// ExecuteServerlessYAMLWorkflow parses and validates the input YAML and returns success if valid.
-func ExecuteServerlessYAMLWorkflow(ctx workflow.Context, workflowYAML string) (bool, error) {
+// WorkflowState represents the state of a serverless workflow execution
+type WorkflowState struct {
+	State      map[string]interface{} `json:"state"`
+	CurrentTask string                `json:"current_task"`
+	Status     string                `json:"status"` // "running", "completed", "failed"
+}
+
+// ExecuteServerlessYAMLWorkflow parses, validates, and executes the serverless workflow YAML.
+func ExecuteServerlessYAMLWorkflow(ctx workflow.Context, workflowYAML string) (map[string]interface{}, error) {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("ExecuteServerlessYAMLWorkflow workflow started")
 
+	// Initialize workflow state
+	workflowState := &WorkflowState{
+		State:      make(map[string]interface{}),
+		CurrentTask: "",
+		Status:     "running",
+	}
+
+	// Set up query handler for workflow state
+	err := workflow.SetQueryHandler(ctx, "get-workflow-state", func() (*WorkflowState, error) {
+		return workflowState, nil
+	})
+	if err != nil {
+		logger.Error("Failed to set query handler", "error", err)
+		return nil, err
+	}
+
 	// Parse and validate the workflow YAML (validation is automatic)
-	_, err := parser.FromYAMLSource([]byte(workflowYAML))
+	workflowDef, err := parser.FromYAMLSource([]byte(workflowYAML))
 	if err != nil {
 		logger.Error("Failed to parse serverless workflow YAML", "error", err)
-		return false, fmt.Errorf("invalid serverless workflow YAML: %w", err)
+		workflowState.Status = "failed"
+		return nil, fmt.Errorf("invalid serverless workflow YAML: %w", err)
 	}
 
 	logger.Info("Serverless workflow YAML parsed and validated successfully")
-	return true, nil
+
+	// Execute the workflow
+	result, err := executeWorkflowDefinitionWithState(ctx, workflowDef, workflowState)
+	if err != nil {
+		logger.Error("Failed to execute YAML serverless workflow", "error", err)
+		workflowState.Status = "failed"
+		return nil, fmt.Errorf("YAML workflow execution failed: %w", err)
+	}
+
+	workflowState.Status = "completed"
+	logger.Info("Serverless workflow YAML parsed and validated successfully")
+	return result, nil
 }
 
 // ExecuteServerlessJSONWorkflow parses, validates, and executes the serverless workflow JSON.
@@ -66,22 +101,41 @@ func ExecuteServerlessJSONWorkflow(ctx workflow.Context, workflowJSON string) (m
 	logger := workflow.GetLogger(ctx)
 	logger.Info("ExecuteServerlessJSONWorkflow workflow started")
 
+	// Initialize workflow state
+	workflowState := &WorkflowState{
+		State:      make(map[string]interface{}),
+		CurrentTask: "",
+		Status:     "running",
+	}
+
+	// Set up query handler for workflow state
+	err := workflow.SetQueryHandler(ctx, "get-workflow-state", func() (*WorkflowState, error) {
+		return workflowState, nil
+	})
+	if err != nil {
+		logger.Error("Failed to set query handler", "error", err)
+		return nil, err
+	}
+
 	// Parse and validate the workflow JSON (validation is automatic)
 	workflowDef, err := parser.FromJSONSource([]byte(workflowJSON))
 	if err != nil {
 		logger.Error("Failed to parse serverless workflow JSON", "error", err)
+		workflowState.Status = "failed"
 		return nil, fmt.Errorf("invalid serverless workflow JSON: %w", err)
 	}
 
 	logger.Info("Serverless workflow JSON parsed and validated successfully")
 
 	// Execute the workflow
-	result, err := executeWorkflowDefinition(ctx, workflowDef)
+	result, err := executeWorkflowDefinitionWithState(ctx, workflowDef, workflowState)
 	if err != nil {
-		logger.Error("Failed to execute serverless workflow", "error", err)
-		return nil, fmt.Errorf("workflow execution failed: %w", err)
+		logger.Error("Failed to execute JSON serverless workflow", "error", err)
+		workflowState.Status = "failed"
+		return nil, fmt.Errorf("JSON workflow execution failed: %w", err)
 	}
 
+	workflowState.Status = "completed"
 	logger.Info("Serverless workflow executed successfully")
 	return result, nil
 }
@@ -89,7 +143,7 @@ func ExecuteServerlessJSONWorkflow(ctx workflow.Context, workflowJSON string) (m
 // executeWorkflowDefinition steps through the workflow definition and executes tasks
 func executeWorkflowDefinition(ctx workflow.Context, workflowDef *model.Workflow) (map[string]interface{}, error) {
 	logger := workflow.GetLogger(ctx)
-	
+
 	// Set up activity options
 	ao := workflow.ActivityOptions{
 		StartToCloseTimeout: time.Second * 30,
@@ -98,7 +152,7 @@ func executeWorkflowDefinition(ctx workflow.Context, workflowDef *model.Workflow
 
 	// Initialize workflow state
 	workflowState := make(map[string]interface{})
-	
+
 	// Execute the "do" tasks
 	if workflowDef.Do != nil {
 		result, err := executeTasks(ctx, *workflowDef.Do, workflowState)
@@ -112,6 +166,29 @@ func executeWorkflowDefinition(ctx workflow.Context, workflowDef *model.Workflow
 	return workflowState, nil
 }
 
+// executeWorkflowDefinitionWithState steps through the workflow definition and executes tasks with state tracking
+func executeWorkflowDefinitionWithState(ctx workflow.Context, workflowDef *model.Workflow, state *WorkflowState) (map[string]interface{}, error) {
+	logger := workflow.GetLogger(ctx)
+
+	// Set up activity options
+	ao := workflow.ActivityOptions{
+		StartToCloseTimeout: time.Second * 30,
+	}
+	ctx = workflow.WithActivityOptions(ctx, ao)
+
+	// Execute the "do" tasks
+	if workflowDef.Do != nil {
+		result, err := executeTasksWithState(ctx, *workflowDef.Do, state)
+		if err != nil {
+			return nil, err
+		}
+		state.State["result"] = result
+	}
+
+	logger.Info("Workflow execution completed", "state", state.State)
+	return state.State, nil
+}
+
 // executeTasks executes a list of tasks sequentially
 func executeTasks(ctx workflow.Context, tasks model.TaskList, state map[string]interface{}) (interface{}, error) {
 	logger := workflow.GetLogger(ctx)
@@ -119,17 +196,40 @@ func executeTasks(ctx workflow.Context, tasks model.TaskList, state map[string]i
 
 	for i, taskItem := range tasks {
 		logger.Info("Executing task", "index", i, "key", taskItem.Key)
-		
+
 		result, err := executeTaskItem(ctx, taskItem, state)
 		if err != nil {
 			return nil, fmt.Errorf("task %d (%s) failed: %w", i, taskItem.Key, err)
 		}
-		
+
 		lastResult = result
 		state[fmt.Sprintf("task_%d_result", i)] = result
 		state[taskItem.Key] = result
 	}
 
+	return lastResult, nil
+}
+
+// executeTasksWithState executes a list of tasks sequentially with state tracking
+func executeTasksWithState(ctx workflow.Context, tasks model.TaskList, workflowState *WorkflowState) (interface{}, error) {
+	logger := workflow.GetLogger(ctx)
+	var lastResult interface{}
+
+	for i, taskItem := range tasks {
+		workflowState.CurrentTask = taskItem.Key
+		logger.Info("Executing task", "index", i, "key", taskItem.Key)
+
+		result, err := executeTaskItem(ctx, taskItem, workflowState.State)
+		if err != nil {
+			return nil, fmt.Errorf("task %d (%s) failed: %w", i, taskItem.Key, err)
+		}
+
+		lastResult = result
+		workflowState.State[fmt.Sprintf("task_%d_result", i)] = result
+		workflowState.State[taskItem.Key] = result
+	}
+
+	workflowState.CurrentTask = ""
 	return lastResult, nil
 }
 
@@ -158,7 +258,7 @@ func executeTaskItem(ctx workflow.Context, taskItem *model.TaskItem, state map[s
 // executeHTTPTask handles HTTP calls
 func executeHTTPTask(ctx workflow.Context, httpTask *model.CallHTTP, state map[string]interface{}) (interface{}, error) {
 	logger := workflow.GetLogger(ctx)
-	
+
 	// Execute HTTP call via activity
 	var result HTTPCallResult
 	err := workflow.ExecuteActivity(ctx, HTTPCallActivity, HTTPCallRequest{
@@ -167,11 +267,11 @@ func executeHTTPTask(ctx workflow.Context, httpTask *model.CallHTTP, state map[s
 		Body:     httpTask.With.Body,
 		Headers:  httpTask.With.Headers,
 	}).Get(ctx, &result)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("HTTP call failed: %w", err)
 	}
-	
+
 	logger.Info("HTTP call completed", "status", result.Status, "endpoint", httpTask.With.Endpoint.String())
 	return result, nil
 }
@@ -179,11 +279,11 @@ func executeHTTPTask(ctx workflow.Context, httpTask *model.CallHTTP, state map[s
 // executeForkTaskItem handles parallel execution
 func executeForkTaskItem(ctx workflow.Context, forkTask *model.ForkTask, state map[string]interface{}) (interface{}, error) {
 	logger := workflow.GetLogger(ctx)
-	
+
 	if forkTask.Fork.Branches == nil || len(*forkTask.Fork.Branches) == 0 {
 		return nil, fmt.Errorf("fork task has no branches")
 	}
-	
+
 	// Execute branches in parallel
 	branches := *forkTask.Fork.Branches
 	futures := make([]workflow.Future, len(branches))
@@ -193,7 +293,7 @@ func executeForkTaskItem(ctx workflow.Context, forkTask *model.ForkTask, state m
 			State: state,
 		})
 	}
-	
+
 	// Wait for all branches to complete
 	results := make([]interface{}, len(futures))
 	for i, future := range futures {
@@ -204,7 +304,7 @@ func executeForkTaskItem(ctx workflow.Context, forkTask *model.ForkTask, state m
 		}
 		results[i] = result
 	}
-	
+
 	logger.Info("Fork task completed", "branches", len(results))
 	return results, nil
 }
@@ -221,24 +321,24 @@ func executeSetTaskItem(setTask *model.SetTask, state map[string]interface{}) (i
 func executeDoTask(ctx workflow.Context, doTask *model.DoTask, state map[string]interface{}) (interface{}, error) {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("Executing do task with nested tasks", "taskCount", len(*doTask.Do))
-	
+
 	// Execute nested tasks sequentially
 	return executeTasks(ctx, *doTask.Do, state)
 }
 
 // HTTPCallRequest represents an HTTP call request
 type HTTPCallRequest struct {
-	Method   string                 `json:"method"`
-	Endpoint string                 `json:"endpoint"`
-	Body     interface{}           `json:"body"`
-	Headers  map[string]string     `json:"headers"`
+	Method   string            `json:"method"`
+	Endpoint string            `json:"endpoint"`
+	Body     interface{}       `json:"body"`
+	Headers  map[string]string `json:"headers"`
 }
 
 // HTTPCallResult represents an HTTP call result
 type HTTPCallResult struct {
-	Status   int                    `json:"status"`
-	Body     interface{}           `json:"body"`
-	Headers  map[string]string     `json:"headers"`
+	Status  int               `json:"status"`
+	Body    interface{}       `json:"body"`
+	Headers map[string]string `json:"headers"`
 }
 
 // ExecuteBranchRequest represents a branch execution request
@@ -264,23 +364,23 @@ func HTTPCallActivity(ctx context.Context, req HTTPCallRequest) (HTTPCallResult,
 // executeTemporalCall handles calls to temporal endpoints
 func executeTemporalCall(ctx context.Context, req HTTPCallRequest) (HTTPCallResult, error) {
 	logger := activity.GetLogger(ctx)
-	
+
 	// Parse the request body to determine if it's a workflow or activity call
 	bodyBytes, err := json.Marshal(req.Body)
 	if err != nil {
 		return HTTPCallResult{}, fmt.Errorf("failed to marshal request body: %w", err)
 	}
-	
+
 	var callRequest struct {
 		WorkflowType string                 `json:"workflowType"`
 		ActivityType string                 `json:"activityType"`
 		Input        map[string]interface{} `json:"input"`
 	}
-	
+
 	if err := json.Unmarshal(bodyBytes, &callRequest); err != nil {
 		return HTTPCallResult{}, fmt.Errorf("failed to parse temporal call request: %w", err)
 	}
-	
+
 	if callRequest.WorkflowType != "" {
 		logger.Info("Executing child workflow", "workflowType", callRequest.WorkflowType)
 		// TODO: Execute child workflow
@@ -289,7 +389,7 @@ func executeTemporalCall(ctx context.Context, req HTTPCallRequest) (HTTPCallResu
 			Body:   map[string]interface{}{"result": "Child workflow executed", "workflowType": callRequest.WorkflowType},
 		}, nil
 	}
-	
+
 	if callRequest.ActivityType != "" {
 		logger.Info("Executing activity", "activityType", callRequest.ActivityType)
 		// TODO: Execute activity
@@ -298,14 +398,14 @@ func executeTemporalCall(ctx context.Context, req HTTPCallRequest) (HTTPCallResu
 			Body:   map[string]interface{}{"result": "Activity executed", "activityType": callRequest.ActivityType},
 		}, nil
 	}
-	
+
 	return HTTPCallResult{}, fmt.Errorf("unknown temporal call type")
 }
 
 // executeRegularHTTPCall handles regular HTTP calls
 func executeRegularHTTPCall(ctx context.Context, req HTTPCallRequest) (HTTPCallResult, error) {
 	logger := activity.GetLogger(ctx)
-	
+
 	// Marshal request body
 	var bodyReader io.Reader
 	if req.Body != nil {
@@ -315,19 +415,19 @@ func executeRegularHTTPCall(ctx context.Context, req HTTPCallRequest) (HTTPCallR
 		}
 		bodyReader = bytes.NewReader(bodyBytes)
 	}
-	
+
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, req.Endpoint, bodyReader)
 	if err != nil {
 		return HTTPCallResult{}, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
-	
+
 	// Set headers
 	httpReq.Header.Set("Content-Type", "application/json")
 	for key, value := range req.Headers {
 		httpReq.Header.Set(key, value)
 	}
-	
+
 	// Execute request
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(httpReq)
@@ -335,13 +435,13 @@ func executeRegularHTTPCall(ctx context.Context, req HTTPCallRequest) (HTTPCallR
 		return HTTPCallResult{}, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	// Read response
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return HTTPCallResult{}, fmt.Errorf("failed to read response body: %w", err)
 	}
-	
+
 	// Parse response body as JSON
 	var responseData interface{}
 	if len(respBody) > 0 {
@@ -350,7 +450,7 @@ func executeRegularHTTPCall(ctx context.Context, req HTTPCallRequest) (HTTPCallR
 			responseData = string(respBody)
 		}
 	}
-	
+
 	logger.Info("HTTP call completed", "status", resp.StatusCode)
 	return HTTPCallResult{
 		Status: resp.StatusCode,
@@ -371,23 +471,23 @@ func executeRegularHTTPCall(ctx context.Context, req HTTPCallRequest) (HTTPCallR
 func ExecuteBranchActivity(ctx context.Context, req ExecuteBranchRequest) (interface{}, error) {
 	logger := activity.GetLogger(ctx)
 	logger.Info("ExecuteBranchActivity started", "tasks", len(req.Tasks))
-	
+
 	// Execute tasks sequentially within this branch
 	branchState := make(map[string]interface{})
 	var lastResult interface{}
-	
+
 	// Copy parent state to branch state
 	for key, value := range req.State {
 		branchState[key] = value
 	}
-	
+
 	for i, taskItem := range req.Tasks {
 		logger.Info("Executing branch task", "index", i, "key", taskItem.Key)
-		
+
 		// Execute each task based on its type
 		var result interface{}
 		var err error
-		
+
 		if doTask := taskItem.AsDoTask(); doTask != nil {
 			// Handle "do" tasks which contain nested task lists
 			result, err = executeBranchDoTask(ctx, doTask, branchState)
@@ -398,16 +498,16 @@ func ExecuteBranchActivity(ctx context.Context, req ExecuteBranchRequest) (inter
 		} else {
 			err = fmt.Errorf("unsupported task type in branch: %s", taskItem.Key)
 		}
-		
+
 		if err != nil {
 			logger.Error("Branch task failed", "task", taskItem.Key, "error", err)
 			return nil, fmt.Errorf("branch task %s failed: %w", taskItem.Key, err)
 		}
-		
+
 		lastResult = result
 		branchState[taskItem.Key] = result
 	}
-	
+
 	logger.Info("Branch execution completed", "tasks", len(req.Tasks))
 	return map[string]interface{}{
 		"branch_result": lastResult,
@@ -420,15 +520,15 @@ func ExecuteBranchActivity(ctx context.Context, req ExecuteBranchRequest) (inter
 func executeBranchDoTask(ctx context.Context, doTask *model.DoTask, state map[string]interface{}) (interface{}, error) {
 	logger := activity.GetLogger(ctx)
 	logger.Info("Executing branch do task", "nestedTasks", len(*doTask.Do))
-	
+
 	// Execute nested tasks sequentially
 	var lastResult interface{}
 	for i, nestedTaskItem := range *doTask.Do {
 		logger.Info("Executing nested task in branch", "index", i, "key", nestedTaskItem.Key)
-		
+
 		var result interface{}
 		var err error
-		
+
 		if httpTask := nestedTaskItem.AsCallHTTPTask(); httpTask != nil {
 			result, err = executeBranchHTTPTask(ctx, httpTask)
 		} else if setTask := nestedTaskItem.AsSetTask(); setTask != nil {
@@ -436,15 +536,15 @@ func executeBranchDoTask(ctx context.Context, doTask *model.DoTask, state map[st
 		} else {
 			err = fmt.Errorf("unsupported nested task type in branch: %s", nestedTaskItem.Key)
 		}
-		
+
 		if err != nil {
 			return nil, fmt.Errorf("nested task %s failed: %w", nestedTaskItem.Key, err)
 		}
-		
+
 		lastResult = result
 		state[nestedTaskItem.Key] = result
 	}
-	
+
 	return lastResult, nil
 }
 
@@ -452,7 +552,7 @@ func executeBranchDoTask(ctx context.Context, doTask *model.DoTask, state map[st
 func executeBranchHTTPTask(ctx context.Context, httpTask *model.CallHTTP) (interface{}, error) {
 	logger := activity.GetLogger(ctx)
 	logger.Info("Executing branch HTTP task", "endpoint", httpTask.With.Endpoint.String())
-	
+
 	// Use the same HTTP call logic as the main workflow
 	req := HTTPCallRequest{
 		Method:   httpTask.With.Method,
@@ -460,7 +560,7 @@ func executeBranchHTTPTask(ctx context.Context, httpTask *model.CallHTTP) (inter
 		Body:     httpTask.With.Body,
 		Headers:  httpTask.With.Headers,
 	}
-	
+
 	return executeRegularHTTPCall(ctx, req)
 }
 

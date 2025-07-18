@@ -54,12 +54,16 @@ func ChatbotWorkflow(ctx workflow.Context, threadID string) (*ChatbotState, erro
 	logger.Info("ChatbotWorkflow started", "threadID", threadID)
 
 	// Initialize with system prompt for serverless workflow assistance
-	systemPrompt := `You are a specialized assistant dedicated to helping users create workflow definitions based on the CNCF Serverless Workflow v1.0 specification. Your primary focus is to:
+	systemPrompt := `You are a specialized assistant dedicated to helping users create workflow definitions in YAML based on the CNCF Serverless Workflow v1.0 specification. Your primary focus is to:
 
-1. Help users design and create serverless workflow definitions in JSON format
-2. Follow the official schema specification from https://serverlessworkflow.io/schemas/1.0.0/workflow.json
+1. Help users design and create serverless workflow definitions in YAML format
+2. Follow the official schema specification from https://serverlessworkflow.io/schemas/1.0.0/workflow.yaml
 3. Ensure that all workflow definitions are valid and conform to the schema
 4. all http calls should be made to sub-paths under localhost:8088/demo
+5. do not use "uri", use "endpoint" for http calls
+6. Provide clear and concise YAML workflow definitions without unnecessary explanations or comments
+7. use dsl version 1.0.0, not 1.0.0-alpha1
+
 
 Make sure to prioritize creating valid, well-structured workflow definitions that conform to the CNCF Serverless Workflow v1.0 specification with json spec at https://serverlessworkflow.io/schemas/1.0.0/workflow.json. Ask clarifying questions about the user's requirements to build the most appropriate workflow for their use case.`
 
@@ -102,7 +106,7 @@ Make sure to prioritize creating valid, well-structured workflow definitions tha
 		activities := NewChatbotActivities()
 
 		// Try to get a valid response, with retries for invalid workflows
-		maxRetries := 3
+		maxRetries := 4
 		for retry := 0; retry < maxRetries; retry++ {
 			var response *anthropic.Message
 			err := workflow.ExecuteActivity(ctx, activities.CallClaudeAPI, state.SystemPrompt, state.Conversation).Get(ctx, &response)
@@ -115,8 +119,8 @@ Make sure to prioritize creating valid, well-structured workflow definitions tha
 				break
 			}
 
-			// Check if the response contains a valid workflow
-			validationResult := validateWorkflowInResponse(response)
+			// Check if the response contains a valid workflow (check YAML first since system prompt requests YAML)
+			validationResult := validateWorkflowInResponse(response, "yaml")
 			if validationResult.ValidationError != "" {
 				logger.Error("Failed to validate workflow in response", "error", validationResult.ValidationError)
 			}
@@ -135,7 +139,7 @@ Make sure to prioritize creating valid, well-structured workflow definitions tha
 				state.Conversation = append(state.Conversation, response.ToParam())
 
 				// Then add correction request
-				correctionPrompt := fmt.Sprintf("The workflow you provided has validation errors:\n\n%s\n\nPlease correct the workflow and provide a valid JSON workflow definition.", validationResult.ValidationError)
+				correctionPrompt := fmt.Sprintf("The workflow you provided has validation errors:\n\n%s\n\nPlease correct the workflow and provide a valid YAML workflow definition.", validationResult.ValidationError)
 				state.Conversation = append(state.Conversation, anthropic.NewUserMessage(anthropic.NewTextBlock(correctionPrompt)))
 
 				// If this is the last retry, stop processing
@@ -198,7 +202,7 @@ func (a *ChatbotActivities) CallClaudeAPI(ctx context.Context, systemPrompt stri
 }
 
 // validateWorkflowInResponse validates workflow code in Claude's response (deterministic function)
-func validateWorkflowInResponse(response *anthropic.Message) WorkflowValidationResult {
+func validateWorkflowInResponse(response *anthropic.Message, format string) WorkflowValidationResult {
 	result := WorkflowValidationResult{
 		HasWorkflow:     false,
 		IsValid:         false,
@@ -227,8 +231,18 @@ func validateWorkflowInResponse(response *anthropic.Message) WorkflowValidationR
 		return result
 	}
 
-	// Look for JSON code blocks
-	codeBlock := extractJSONCodeBlock(responseText)
+	// Look for code blocks based on format
+	var codeBlock string
+	if format == "yaml" {
+		codeBlock = extractYAMLCodeBlock(responseText)
+		if codeBlock == "" {
+			// Fallback to JSON if no YAML found
+			codeBlock = extractJSONCodeBlock(responseText)
+		}
+	} else {
+		codeBlock = extractJSONCodeBlock(responseText)
+	}
+
 	if codeBlock == "" {
 		return result
 	}
@@ -236,8 +250,14 @@ func validateWorkflowInResponse(response *anthropic.Message) WorkflowValidationR
 	result.HasWorkflow = true
 	result.WorkflowCode = codeBlock
 
-	// Try to parse the workflow
-	_, err := parser.FromJSONSource([]byte(codeBlock))
+	// Try to parse the workflow based on format
+	var err error
+	if format == "yaml" {
+		_, err = parser.FromYAMLSource([]byte(codeBlock))
+	} else {
+		_, err = parser.FromJSONSource([]byte(codeBlock))
+	}
+
 	if err != nil {
 		result.IsValid = false
 		result.ValidationError = err.Error()
@@ -278,6 +298,25 @@ func extractJSONCodeBlock(text string) string {
 	}
 
 	return strings.TrimSpace(largestJSON)
+}
+
+// extractYAMLCodeBlock extracts YAML code from markdown code blocks
+func extractYAMLCodeBlock(text string) string {
+	// Look for ```yaml or ```yml followed by YAML content
+	patterns := []string{
+		"```yaml\\s*\\n([\\s\\S]*?)```",
+		"```yml\\s*\\n([\\s\\S]*?)```",
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(text)
+		if len(matches) > 1 {
+			return strings.TrimSpace(matches[1])
+		}
+	}
+
+	return ""
 }
 
 func getClaudeAPIKey() string {

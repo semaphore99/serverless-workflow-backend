@@ -253,6 +253,66 @@ func (h *Handlers) GetChatThread(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+func (h *Handlers) ExecuteYAMLWorkflow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read the raw YAML payload
+	workflowYAMLBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+
+	options := client.StartWorkflowOptions{
+		ID:        "yaml-workflow-" + uuid.New().String(),
+		TaskQueue: "serverless-workflow-task-queue",
+	}
+
+	wfRun, err := h.temporal.ExecuteWorkflow(r.Context(), options, workflows.ExecuteServerlessYAMLWorkflow, string(workflowYAMLBytes))
+	if err != nil {
+		log.Printf("Unable to execute YAML workflow: %v", err)
+		http.Error(w, "Failed to execute YAML workflow", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"workflow_id": wfRun.GetID()})
+}
+
+func (h *Handlers) GetWorkflowState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	workflowID := r.URL.Query().Get("workflow_id")
+	if workflowID == "" {
+		http.Error(w, "workflow_id parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	var result *workflows.WorkflowState
+	resp, err := h.temporal.QueryWorkflow(r.Context(), workflowID, "", "get-workflow-state")
+	if err != nil {
+		log.Printf("Unable to query workflow state: %v", err)
+		http.Error(w, "Failed to get workflow state", http.StatusInternalServerError)
+		return
+	}
+
+	err = resp.Get(&result)
+	if err != nil {
+		log.Printf("Unable to decode workflow state: %v", err)
+		http.Error(w, "Failed to decode workflow state", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 func (h *Handlers) DemoHandler(w http.ResponseWriter, r *http.Request) {
 	// Random wait time between 1-5 seconds
 	waitTime := time.Duration(rand.Intn(4)+1) * time.Second
