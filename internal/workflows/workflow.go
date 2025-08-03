@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -251,6 +252,12 @@ func executeTaskItem(ctx workflow.Context, taskItem *model.TaskItem, state map[s
 	if doTask := taskItem.AsDoTask(); doTask != nil {
 		return executeDoTask(ctx, doTask, state)
 	}
+	if switchTask := taskItem.AsSwitchTask(); switchTask != nil {
+		return executeSwitchTask(ctx, switchTask, state)
+	}
+	if forTask := taskItem.AsForTask(); forTask != nil {
+		return executeForTask(ctx, forTask, state)
+	}
 
 	return nil, fmt.Errorf("unsupported task type for task: %s", taskItem.Key)
 }
@@ -339,6 +346,12 @@ type HTTPCallResult struct {
 	Status  int               `json:"status"`
 	Body    interface{}       `json:"body"`
 	Headers map[string]string `json:"headers"`
+}
+
+// EvaluateExpressionRequest represents an expression evaluation request
+type EvaluateExpressionRequest struct {
+	Expression string                 `json:"expression"`
+	Context    map[string]interface{} `json:"context"`
 }
 
 // ExecuteBranchRequest represents a branch execution request
@@ -570,4 +583,227 @@ func executeBranchSetTask(setTask *model.SetTask, state map[string]interface{}) 
 		state[key] = value
 	}
 	return setTask.Set, nil
+}
+
+// executeSwitchTask handles conditional branching logic
+func executeSwitchTask(ctx workflow.Context, switchTask *model.SwitchTask, state map[string]interface{}) (interface{}, error) {
+	logger := workflow.GetLogger(ctx)
+	logger.Info("Executing switch task", "casesCount", len(switchTask.Switch))
+
+	// Iterate through switch cases in order
+	for i, switchItem := range switchTask.Switch {
+		for caseName, switchCase := range switchItem {
+			logger.Info("Evaluating switch case", "case", caseName, "index", i)
+
+			// Evaluate condition if present
+			shouldExecute := true
+			if switchCase.When != nil {
+				var conditionResult bool
+				err := workflow.ExecuteActivity(ctx, EvaluateExpressionActivity, EvaluateExpressionRequest{
+					Expression: switchCase.When.Value,
+					Context:    state,
+				}).Get(ctx, &conditionResult)
+				
+				if err != nil {
+					return nil, fmt.Errorf("failed to evaluate switch condition '%s': %w", switchCase.When.Value, err)
+				}
+				shouldExecute = conditionResult
+			}
+
+			// Execute case if condition matches
+			if shouldExecute {
+				logger.Info("Switch case matched", "case", caseName, "then", switchCase.Then.Value)
+				
+				// Handle flow directive - for now, we'll just return the directive
+				// In a full implementation, this would control workflow navigation
+				return map[string]interface{}{
+					"switchCase": caseName,
+					"directive": switchCase.Then.Value,
+					"matched": true,
+				}, nil
+			}
+		}
+	}
+
+	// No case matched - this should not happen if there's a default case
+	logger.Warn("No switch case matched")
+	return map[string]interface{}{
+		"matched": false,
+		"error": "no switch case matched",
+	}, nil
+}
+
+// executeForTask handles loop/iteration logic
+func executeForTask(ctx workflow.Context, forTask *model.ForTask, state map[string]interface{}) (interface{}, error) {
+	logger := workflow.GetLogger(ctx)
+	logger.Info("Executing for task", "collection", forTask.For.In, "each", forTask.For.Each)
+
+	// Evaluate the collection expression
+	var collection interface{}
+	err := workflow.ExecuteActivity(ctx, EvaluateExpressionActivity, EvaluateExpressionRequest{
+		Expression: forTask.For.In,
+		Context:    state,
+	}).Get(ctx, &collection)
+	if err != nil {
+		return nil, fmt.Errorf("failed to evaluate collection expression '%s': %w", forTask.For.In, err)
+	}
+
+	// Convert to slice for iteration
+	items, ok := collection.([]interface{})
+	if !ok {
+		// Try to handle single item as a collection of one
+		items = []interface{}{collection}
+	}
+
+	var results []interface{}
+	
+	// Iterate over collection
+	for index, item := range items {
+		logger.Info("Executing for loop iteration", "index", index, "item", item)
+		
+		// Create scoped state with loop variables
+		loopState := make(map[string]interface{})
+		for k, v := range state {
+			loopState[k] = v
+		}
+		
+		// Set loop variables
+		if forTask.For.Each != "" {
+			loopState[forTask.For.Each] = item
+		}
+		if forTask.For.At != "" {
+			loopState[forTask.For.At] = index
+		}
+		
+		// Check while condition if present
+		if forTask.While != "" {
+			var shouldContinue bool
+			err := workflow.ExecuteActivity(ctx, EvaluateExpressionActivity, EvaluateExpressionRequest{
+				Expression: forTask.While,
+				Context:    loopState,
+			}).Get(ctx, &shouldContinue)
+			if err != nil {
+				return nil, fmt.Errorf("failed to evaluate while condition '%s': %w", forTask.While, err)
+			}
+			if !shouldContinue {
+				logger.Info("For loop while condition failed, breaking", "index", index)
+				break
+			}
+		}
+		
+		// Execute nested tasks for this iteration
+		result, err := executeTasksWithState(ctx, *forTask.Do, &WorkflowState{
+			State: loopState,
+			CurrentTask: fmt.Sprintf("for-iteration-%d", index),
+			Status: "running",
+		})
+		if err != nil {
+			return nil, fmt.Errorf("iteration %d failed: %w", index, err)
+		}
+		
+		results = append(results, result)
+	}
+	
+	logger.Info("For task completed", "iterations", len(results))
+	return results, nil
+}
+
+// EvaluateExpressionActivity evaluates runtime expressions using a simplified evaluation
+func EvaluateExpressionActivity(ctx context.Context, req EvaluateExpressionRequest) (bool, error) {
+	logger := activity.GetLogger(ctx)
+	logger.Info("Evaluating expression", "expression", req.Expression)
+
+	// Simplified expression evaluation for basic cases
+	// In a full implementation, this would use gojq or similar
+	result, err := evaluateSimpleExpression(req.Expression, req.Context)
+	if err != nil {
+		return false, fmt.Errorf("failed to evaluate expression '%s': %w", req.Expression, err)
+	}
+
+	// Convert result to boolean
+	return isTruthy(result), nil
+}
+
+// evaluateSimpleExpression provides basic expression evaluation
+func evaluateSimpleExpression(expression string, context map[string]interface{}) (interface{}, error) {
+	// Remove ${ } wrapping if present
+	expr := strings.TrimSpace(expression)
+	if strings.HasPrefix(expr, "${") && strings.HasSuffix(expr, "}") {
+		expr = strings.TrimSpace(expr[2 : len(expr)-1])
+	}
+
+	// Handle equality comparisons first (before property access)
+	if strings.Contains(expr, "==") {
+		parts := strings.Split(expr, "==")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid equality expression: %s", expr)
+		}
+		
+		left := strings.TrimSpace(parts[0])
+		right := strings.TrimSpace(parts[1])
+		
+		// Remove quotes from right side
+		if strings.HasPrefix(right, "\"") && strings.HasSuffix(right, "\"") {
+			right = right[1 : len(right)-1]
+		}
+		
+		// Evaluate left side
+		leftValue, err := evaluateSimpleExpression(left, context)
+		if err != nil {
+			return nil, err
+		}
+		
+		// Compare values
+		return fmt.Sprintf("%v", leftValue) == right, nil
+	}
+
+	// Handle simple property access like .status, .orderType
+	if strings.HasPrefix(expr, ".") {
+		propertyName := expr[1:]
+		if value, exists := context[propertyName]; exists {
+			return value, nil
+		}
+		return nil, fmt.Errorf("property '%s' not found in context", propertyName)
+	}
+
+	// Handle direct property names (without dot prefix)
+	if value, exists := context[expr]; exists {
+		return value, nil
+	}
+
+	// Return the expression as-is if it's a literal
+	return expr, nil
+}
+
+// isTruthy determines if a value should be considered true in a boolean context
+func isTruthy(value interface{}) bool {
+	if value == nil {
+		return false
+	}
+	
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		return v != ""
+	case int, int32, int64:
+		return v != 0
+	case float32, float64:
+		return v != 0.0
+	case []interface{}:
+		return len(v) > 0
+	case map[string]interface{}:
+		return len(v) > 0
+	default:
+		// Use reflection for other types
+		rv := reflect.ValueOf(value)
+		switch rv.Kind() {
+		case reflect.Slice, reflect.Array, reflect.Map, reflect.Chan:
+			return rv.Len() > 0
+		case reflect.Ptr, reflect.Interface:
+			return !rv.IsNil()
+		default:
+			return true
+		}
+	}
 }

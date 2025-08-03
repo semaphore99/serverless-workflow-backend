@@ -1,0 +1,32 @@
+document:
+  dsl: 1.0.0
+  namespace: test
+  name: switch-test-workflow
+  version: 1.0.0
+do:
+  - setOrderType:
+      set:
+        orderType: "electronic"
+        status: "pending"
+  - processOrderSwitch:
+      switch:
+        - electronicOrder:
+            when: "${.orderType == \"electronic\"}"
+            then: "continue"
+        - physicalOrder:
+            when: "${.orderType == \"physical\"}"
+            then: "continue"
+        - defaultOrder:
+            then: "continue"
+  - processElectronicOrder:
+      call: http
+      with:
+        method: post
+        endpoint: http://localhost:8088/demo/electronic-order
+        body:
+          orderType: "${.orderType}"
+          status: "${.status}"
+  - completeOrder:
+      set:
+        result: "Order processed successfully"
+        finalStatus: "completed"

@@ -1,0 +1,39 @@
+document:
+  dsl: 1.0.0
+  namespace: demo
+  name: parallel-processing
+  version: 1.0.0
+  title: Parallel Processing Workflow
+  summary: A workflow demonstrating parallel task execution
+do:
+  - processInParallel:
+      do:
+        - processOrderData:
+            call: http
+            with:
+              method: post
+              endpoint: http://localhost:8088/demo/process-order
+              body:
+                orderId: ${ .orderId }
+                items: ${ .items }
+        - validatePayment:
+            call: http
+            with:
+              method: post
+              endpoint: http://localhost:8088/demo/validate-payment
+              body:
+                paymentId: ${ .paymentId }
+                amount: ${ .amount }
+        - checkInventory:
+            call: http
+            with:
+              method: get
+              endpoint: http://localhost:8088/demo/check-inventory
+              body:
+                items: ${ .items }
+  - combineResults:
+      set:
+        orderStatus: ${ .processOrderData.status }
+        paymentValid: ${ .validatePayment.valid }
+        inventoryAvailable: ${ .checkInventory.available }
+        processingComplete: true

@@ -22,6 +22,7 @@ func StartWorker(c client.Client) worker.Worker {
 	// Register serverless workflow activities
 	w.RegisterActivity(HTTPCallActivity)
 	w.RegisterActivity(ExecuteBranchActivity)
+	w.RegisterActivity(EvaluateExpressionActivity)
 
 	return w
 }

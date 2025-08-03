@@ -1,0 +1,31 @@
+document:
+  dsl: 1.0.0
+  namespace: test
+  name: for-test-workflow
+  version: 1.0.0
+do:
+  - setItems:
+      set:
+        items: ["task1", "task2", "task3"]
+        processedCount: 0
+  - processItemsLoop:
+      for:
+        each: item
+        in: "${.items}"
+        at: index
+      do:
+        - processItem:
+            call: http
+            with:
+              method: post
+              endpoint: http://localhost:8088/demo/process-item
+              body:
+                item: "${.item}"
+                index: "${.index}"
+        - updateCounter:
+            set:
+              processedCount: "${.index + 1}"
+  - completeProcessing:
+      set:
+        result: "All items processed successfully"
+        totalProcessed: "${.processedCount}"
