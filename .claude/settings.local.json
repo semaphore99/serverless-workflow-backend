@@ -5,7 +5,13 @@
       "Bash(go build:*)",
       "Bash(go vet:*)",
       "Bash(go fmt:*)",
-      "WebFetch(domain:serverlessworkflow.io)"
+      "WebFetch(domain:serverlessworkflow.io)",
+      "Bash(find:*)",
+      "Bash(go mod:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(curl:*)",
+      "Bash(go test:*)",
+      "Bash(git add:*)"
     ],
     "deny": []
   }

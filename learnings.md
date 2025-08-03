@@ -9,7 +9,8 @@
     - e.g. for http call tasks, Claude 4 consistently uses `uri` instead of `endpoint` to specify the target path
   - https://gillesbarbier.medium.com/understanding-the-serverless-workflow-1-0-dsl-6e874a1fd511 is a pretty good primer on the serverless workflow DSL
   - yaml is less verbose than json so uses less tokens
-  - [typescript sdk](https://store.epicgames.com/en-US/download) has a `buildGraph` function that builds a DAG for a given workflow definition
+
+  - [typescript sdk](https://???) has a `buildGraph` function that builds a DAG for a given workflow definition
 
 - Claude Code
   - fantastic to be able to incrementally build up serverless workflow visualizer from simple workflows, slowly resolving issues with building workflow graph structure from tasks, generating edge relationships between tasks, handling task flow transitions, sequential versus fork tasks, task depth and layout engine
